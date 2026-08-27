@@ -46,6 +46,7 @@ jsonwebtoken = { workspace = true, features = ["rust_crypto"] }
 rand = { workspace = true }
 reqwest = "0.12"
 sqlx = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 base64 = { workspace = true }

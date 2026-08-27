@@ -412,7 +412,7 @@ fn test_token_manager_and_handler_integration() {
     // Default Tx = MemoryTransaction; type annotation anchors the generic.
     let transfer_type_repo =
         Arc::new(crate::transfer_type::MemoryTransferTypeMappingStore::new()) as Arc<dyn TransferTypeMappingRepository>;
-    let _handler: SigletDataFlowHandler = create_siglet_handler(&cfg, token_store, token_manager, transfer_type_repo);
+    let _handler: SigletDataFlowHandler = create_siglet_handler(&cfg, token_store, token_manager, transfer_type_repo, reqwest::Client::new());
 }
 
 // ============================================================================

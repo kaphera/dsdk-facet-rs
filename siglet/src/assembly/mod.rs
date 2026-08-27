@@ -129,6 +129,7 @@ pub async fn assemble_memory(
         token_store.clone(),
         token_manager.clone(),
         transfer_type_repo.clone(),
+        http_client.clone(),
     )
     .await?;
     Ok(build_runtime(
@@ -198,6 +199,7 @@ pub async fn assemble_postgres(
         token_store.clone(),
         token_manager.clone(),
         transfer_type_repo.clone(),
+        http_client.clone(),
     )
     .await?;
     Ok(build_runtime(
@@ -244,6 +246,7 @@ pub async fn assemble_postgres_sdk(
     token_store: Arc<dyn TokenStore>,
     token_manager: Arc<dyn TokenManager>,
     transfer_type_repo: Arc<dyn TransferTypeMappingRepository>,
+    http_client: Client,
 ) -> Result<DataPlaneSdk<PgContext>, SigletError> {
     let ctx = PgContext::new(pool);
     let repo = PgDataFlowRepo;
@@ -266,7 +269,7 @@ pub async fn assemble_postgres_sdk(
         .await
         .map_err(|e| SigletError::DataPlane(anyhow::anyhow!(e)))?;
 
-    let siglet_handler = create_siglet_handler(cfg, token_store, token_manager, transfer_type_repo);
+    let siglet_handler = create_siglet_handler(cfg, token_store, token_manager, transfer_type_repo, http_client);
 
     DataPlaneSdk::builder(ctx)
         .with_repo(repo)
@@ -310,11 +313,12 @@ pub async fn assemble_memory_sdk(
     token_store: Arc<dyn TokenStore>,
     token_manager: Arc<dyn TokenManager>,
     transfer_type_repo: Arc<dyn TransferTypeMappingRepository>,
+    http_client: Client,
 ) -> Result<DataPlaneSdk<MemoryContext>, SigletError> {
     let ctx = MemoryContext;
     let flow_repo = MemoryDataFlowRepo::default();
     let cp_repo = MemoryControlPlaneRepo::default();
-    let siglet_handler = create_siglet_handler(cfg, token_store, token_manager, transfer_type_repo);
+    let siglet_handler = create_siglet_handler(cfg, token_store, token_manager, transfer_type_repo, http_client);
 
     DataPlaneSdk::builder(ctx)
         .with_repo(flow_repo)
@@ -544,6 +548,7 @@ fn create_siglet_handler<Tx: Send + 'static>(
     token_store: Arc<dyn TokenStore>,
     token_manager: Arc<dyn TokenManager>,
     transfer_type_repo: Arc<dyn TransferTypeMappingRepository>,
+    http_client: Client,
 ) -> SigletDataFlowHandler<Tx> {
     let transfer_type_mappings: HashMap<String, TransferType> = cfg
         .transfer_types
@@ -557,6 +562,7 @@ fn create_siglet_handler<Tx: Send + 'static>(
         .dataplane_id(DEFAULT_DATAPLANE_ID)
         .transfer_type_repo(transfer_type_repo)
         .transfer_type_mappings(transfer_type_mappings)
+        .http_client(http_client)
         .build()
 }
 

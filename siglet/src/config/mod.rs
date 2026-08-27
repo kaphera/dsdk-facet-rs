@@ -316,6 +316,7 @@ pub enum TokenSource {
     Client,
     #[default]
     Provider,
+    Dataplane,
 }
 
 /// Serializes/deserializes in camelCase (the canonical form used by the management API and its

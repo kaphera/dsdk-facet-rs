@@ -23,7 +23,10 @@ use dataplane_sdk::core::{
     handler::DataFlowHandler,
     model::{
         data_flow::{DataFlow, DataFlowState},
-        messages::DataFlowStatusMessage,
+        messages::{
+            DataFlowStartMessage, DataFlowStatusMessage, DataFlowSuspendMessage,
+            DataFlowTerminateMessage,
+        },
     },
 };
 use dsdk_facet_core::context::ParticipantContext;
@@ -65,6 +68,10 @@ pub struct SigletDataFlowHandler<Tx = MemoryTransaction> {
     /// mappings are configured.
     #[builder(default = Arc::new(CelClaimMapper::new()) as Arc<dyn ClaimMapper>)]
     claim_mapper: Arc<dyn ClaimMapper>,
+    /// HTTP client used to forward PUSH flows to the dataplane's signaling endpoint.
+    /// Only used when a transfer type's `token_source` is `Dataplane`.
+    #[builder(default = reqwest::Client::new())]
+    http_client: reqwest::Client,
     #[builder(skip)]
     _phantom: PhantomData<fn() -> Tx>,
 }
@@ -318,6 +325,152 @@ impl<Tx> SigletDataFlowHandler<Tx> {
             .build()
     }
 
+    /// Builds a `DataFlowStartMessage` from the internal `DataFlow` model.
+    ///
+    /// The dataplane's signaling API expects the wire-level message format, not the
+    /// SDK's internal `DataFlow`, so this method translates back to the message
+    /// type the `dataplane-sdk-axum` router deserializes.
+    fn build_start_message(flow: &DataFlow) -> DataFlowStartMessage {
+        DataFlowStartMessage::builder()
+            .message_id(uuid::Uuid::new_v4().to_string())
+            .participant_id(flow.participant_id.clone())
+            .counter_party_id(flow.counter_party_id.clone())
+            .dataspace_context(flow.dataspace_context.clone())
+            .process_id(flow.id.clone())
+            .agreement_id(flow.agreement_id.clone())
+            .dataset_id(flow.dataset_id.clone())
+            .profile(flow.profile.clone())
+            .maybe_data_address(flow.data_address.clone())
+            .labels(flow.labels.clone())
+            .metadata(flow.metadata.clone())
+            .claims(flow.claims.clone())
+            .build()
+    }
+
+    /// Forwards a PUSH start message to the dataplane's signaling endpoint.
+    ///
+    /// Returns the dataplane's `DataFlowStatusMessage` verbatim so the SDK can
+    /// propagate the flow state to the control plane.
+    async fn forward_start(
+        &self,
+        flow: &DataFlow,
+        transfer_type: &TransferType,
+    ) -> HandlerResult<DataFlowStatusMessage> {
+        let (endpoint, _) = Self::resolve_endpoint(transfer_type, flow)?;
+        let url = format!(
+            "{}/api/v1/{}/dataflows/start",
+            endpoint.trim_end_matches('/'),
+            flow.participant_context_id
+        );
+
+        let start_msg = Self::build_start_message(flow);
+
+        tracing::info!(
+            flow_id = %flow.id,
+            profile = %flow.profile,
+            url = %url,
+            "forwarding PUSH start to dataplane"
+        );
+
+        let response = self
+            .http_client
+            .post(&url)
+            .json(&start_msg)
+            .send()
+            .await
+            .map_err(|e| {
+                HandlerError::Generic(
+                    format!("Failed to forward start to dataplane at {url}: {e}").into(),
+                )
+            })?;
+
+        let status_msg: DataFlowStatusMessage = response.json().await.map_err(|e| {
+            HandlerError::Generic(
+                format!("Failed to parse dataplane start response from {url}: {e}").into(),
+            )
+        })?;
+
+        Ok(status_msg)
+    }
+
+    /// Forwards a terminate request to the dataplane's signaling endpoint.
+    async fn forward_terminate(
+        &self,
+        flow: &DataFlow,
+        transfer_type: &TransferType,
+    ) -> HandlerResult<()> {
+        let (endpoint, _) = Self::resolve_endpoint(transfer_type, flow)?;
+        let url = format!(
+            "{}/api/v1/{}/dataflows/{}/terminate",
+            endpoint.trim_end_matches('/'),
+            flow.participant_context_id,
+            flow.id
+        );
+
+        let terminate_msg = DataFlowTerminateMessage::builder()
+            .maybe_reason(flow.termination_reason.clone())
+            .build();
+
+        tracing::info!(
+            flow_id = %flow.id,
+            profile = %flow.profile,
+            url = %url,
+            "forwarding PUSH terminate to dataplane"
+        );
+
+        self.http_client
+            .post(&url)
+            .json(&terminate_msg)
+            .send()
+            .await
+            .map_err(|e| {
+                HandlerError::Generic(
+                    format!("Failed to forward terminate to dataplane at {url}: {e}").into(),
+                )
+            })?;
+
+        Ok(())
+    }
+
+    /// Forwards a suspend request to the dataplane's signaling endpoint.
+    async fn forward_suspend(
+        &self,
+        flow: &DataFlow,
+        transfer_type: &TransferType,
+    ) -> HandlerResult<()> {
+        let (endpoint, _) = Self::resolve_endpoint(transfer_type, flow)?;
+        let url = format!(
+            "{}/api/v1/{}/dataflows/{}/suspend",
+            endpoint.trim_end_matches('/'),
+            flow.participant_context_id,
+            flow.id
+        );
+
+        let suspend_msg = DataFlowSuspendMessage {
+            reason: flow.suspension_reason.clone(),
+        };
+
+        tracing::info!(
+            flow_id = %flow.id,
+            profile = %flow.profile,
+            url = %url,
+            "forwarding PUSH suspend to dataplane"
+        );
+
+        self.http_client
+            .post(&url)
+            .json(&suspend_msg)
+            .send()
+            .await
+            .map_err(|e| {
+                HandlerError::Generic(
+                    format!("Failed to forward suspend to dataplane at {url}: {e}").into(),
+                )
+            })?;
+
+        Ok(())
+    }
+
     /// Shared implementation for `on_start` and `on_prepare`.
     ///
     /// Generates a token only when the transfer type's source matches `required_source`,
@@ -377,6 +530,10 @@ impl<Tx: Send> DataFlowHandler for SigletDataFlowHandler<Tx> {
     }
 
     async fn on_start(&self, _tx: &mut Self::Transaction, flow: &DataFlow) -> HandlerResult<DataFlowStatusMessage> {
+        let transfer_type = self.get_transfer_type(flow).await?;
+        if matches!(transfer_type.token_source, TokenSource::Dataplane) {
+            return self.forward_start(flow, &transfer_type).await;
+        }
         self.handle_flow(flow, TokenSource::Provider, DataFlowState::Started)
             .await
     }
@@ -387,6 +544,10 @@ impl<Tx: Send> DataFlowHandler for SigletDataFlowHandler<Tx> {
     }
 
     async fn on_terminate(&self, _tx: &mut Self::Transaction, flow: &DataFlow) -> HandlerResult<()> {
+        let transfer_type = self.get_transfer_type(flow).await?;
+        if matches!(transfer_type.token_source, TokenSource::Dataplane) {
+            return self.forward_terminate(flow, &transfer_type).await;
+        }
         let participant_context = Self::build_participant_context(flow);
         self.cleanup_tokens(flow, &participant_context).await
     }
@@ -422,6 +583,10 @@ impl<Tx: Send> DataFlowHandler for SigletDataFlowHandler<Tx> {
     }
 
     async fn on_suspend(&self, _tx: &mut Self::Transaction, flow: &DataFlow) -> HandlerResult<()> {
+        let transfer_type = self.get_transfer_type(flow).await?;
+        if matches!(transfer_type.token_source, TokenSource::Dataplane) {
+            return self.forward_suspend(flow, &transfer_type).await;
+        }
         // TODO only revoke if this data plane is the token source, otherwise remove from the cache
         let participant_context = Self::build_participant_context(flow);
         self.cleanup_tokens(flow, &participant_context).await
