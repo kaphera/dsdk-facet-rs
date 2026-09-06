@@ -25,8 +25,8 @@ use dataplane_sdk::sdk::DataPlaneSdk;
 use dataplane_sdk_postgres::{PgContext, PgControlPlaneRepo, PgDataFlowRepo};
 use dsdk_facet_core::context::ParticipantContext;
 use dsdk_facet_core::jwt::{
-    DidWebVerificationKeyResolver, JwkSetProvider, JwtGenerator, JwtVerifier, LocalJwtVerifier,
-    MappingTransitKeyResolver, MemorySigningKeyMappingStore, PrefixTransitKeyResolver, SigningAlgorithm,
+    DidWebVerificationKeyResolver, FixedTransitKeyResolver, JwkSetProvider, JwtGenerator, JwtVerifier,
+    LocalJwtVerifier, MappingTransitKeyResolver, MemorySigningKeyMappingStore, SigningAlgorithm,
     SigningKeyMappingRepository, VaultJwtGenerator, VaultVerificationKeyResolver,
 };
 use dsdk_facet_core::lock::{LockManager, MemoryLockManager};
@@ -103,7 +103,11 @@ pub async fn assemble_memory(
     http_client: Client,
 ) -> Result<SigletRuntime<MemoryContext>, SigletError> {
     let vault_client: Arc<dyn VaultSigningClient> = create_vault_client(&cfg.vault).await?;
-    let (jwt_generator, jwt_verifier) = create_jwt_components(vault_client.clone(), cfg.vault.use_http_resolution);
+    let (jwt_generator, jwt_verifier) = create_jwt_components(
+        vault_client.clone(),
+        cfg.vault.use_http_resolution,
+        &cfg.vault.signing_key_name,
+    );
     let server_secret = generate_server_secret(cfg)?;
 
     let (renewable_token_store, lock_manager) = assemble_memory_stores();
@@ -153,7 +157,11 @@ pub async fn assemble_postgres(
 ) -> Result<SigletRuntime<PgContext>, SigletError> {
     let vault_client = create_vault_client(&cfg.vault).await?;
     let signing_client = vault_client.clone() as Arc<dyn VaultSigningClient>;
-    let (jwt_generator, jwt_verifier) = create_jwt_components(signing_client.clone(), cfg.vault.use_http_resolution);
+    let (jwt_generator, jwt_verifier) = create_jwt_components(
+        signing_client.clone(),
+        cfg.vault.use_http_resolution,
+        &cfg.vault.signing_key_name,
+    );
     let server_secret = generate_server_secret(cfg)?;
 
     let StorageBackend::PostgresVault { url } = &cfg.storage_backend else {
@@ -442,18 +450,23 @@ fn create_vault_verifier(resolver: Arc<VaultVerificationKeyResolver>) -> Arc<dyn
     )
 }
 
-/// Creates JWT generator and verifier components
+/// Creates JWT generator and verifier components.
+///
+/// The generator signs with the *configured* `vault.signing_key_name` — the same key the
+/// verification-key resolver loads and the JWKS endpoint serves. Deriving the name from the
+/// signing participant context instead (`{prefix}-{SIGLET_PC_ID}` = `signing-siglet`) split the
+/// sign and verify paths onto different Vault keys whenever the operator configured any other
+/// name, and every minted access token failed verification with `Key '<kid>' not found`.
 fn create_jwt_components(
     vault_client: Arc<dyn VaultSigningClient>,
     use_http_resolution: bool,
+    signing_key_name: &str,
 ) -> (Arc<dyn JwtGenerator>, Arc<dyn JwtVerifier>) {
     let jwt_generator = Arc::new(
         VaultJwtGenerator::builder()
             .signing_client(vault_client)
             .key_resolver(Arc::new(
-                PrefixTransitKeyResolver::builder()
-                    .prefix(ACCESS_TOKEN_SIGNING_KEY_PREFIX)
-                    .build(),
+                FixedTransitKeyResolver::builder().key_name(signing_key_name).build(),
             ))
             .build(),
     );
