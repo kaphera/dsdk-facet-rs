@@ -529,3 +529,21 @@ async fn test_vault_jwt_generator_errors_when_mapping_missing() {
         "expected KeyResolution error, got {err:?}"
     );
 }
+
+#[tokio::test]
+async fn test_fixed_transit_key_resolver_ignores_participant_context() {
+    use crate::jwt::transit_key::{FixedTransitKeyResolver, TransitKeyResolver};
+
+    let resolver = FixedTransitKeyResolver::builder()
+        .key_name("signing-acme-siglet")
+        .build();
+
+    // Whatever context flows through, the configured key wins — this is what keeps
+    // the sign path on the same key the JWKS endpoint serves.
+    for id in ["siglet", "participant-1", "orgs-acme-i-1"] {
+        let pc = ParticipantContext::builder().id(id).build();
+        let key = resolver.resolve(&pc).await.expect("resolution should succeed");
+        assert_eq!(key.key_name, "signing-acme-siglet");
+        assert_eq!(key.kid, None, "kid stays version-derived, as with the prefix resolver");
+    }
+}

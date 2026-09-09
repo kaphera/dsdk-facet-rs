@@ -65,6 +65,30 @@ impl TransitKeyResolver for PrefixTransitKeyResolver {
     }
 }
 
+/// Resolves to a single, explicitly configured transit key, regardless of participant context.
+///
+/// Used when the key name is operator-provided configuration rather than a derived value —
+/// siglet's own access-token minting signs with `vault.signing_key_name`, the same key its
+/// verification-key resolver and JWKS endpoint serve. Deriving the name from the participant
+/// context instead (as [`PrefixTransitKeyResolver`] does) silently splits the sign and verify
+/// paths onto different keys whenever the configured name differs from the derived one, and
+/// every minted token fails verification with `Key '<derived>-<version>' not found`.
+#[derive(Builder)]
+pub struct FixedTransitKeyResolver {
+    #[builder(into)]
+    key_name: String,
+}
+
+#[async_trait]
+impl TransitKeyResolver for FixedTransitKeyResolver {
+    async fn resolve(&self, _participant_context: &ParticipantContext) -> Result<TransitKeyRef, JwtGenerationError> {
+        Ok(TransitKeyRef {
+            key_name: self.key_name.clone(),
+            kid: None,
+        })
+    }
+}
+
 /// Resolves the transit key name and `kid` from a per-participant-context database mapping.
 ///
 /// Used by the consumer-side token renewal flow. A missing mapping is a hard error

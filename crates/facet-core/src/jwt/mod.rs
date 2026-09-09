@@ -34,7 +34,9 @@ pub use mapping::{
 pub use resolver::VaultVerificationKeyResolver;
 #[cfg(any(test, feature = "test-fixtures"))]
 pub use test_fixtures::{LocalJwtGenerator, StaticSigningKeyResolver, StaticVerificationKeyResolver};
-pub use transit_key::{MappingTransitKeyResolver, PrefixTransitKeyResolver, TransitKeyRef, TransitKeyResolver};
+pub use transit_key::{
+    FixedTransitKeyResolver, MappingTransitKeyResolver, PrefixTransitKeyResolver, TransitKeyRef, TransitKeyResolver,
+};
 pub use verifier::LocalJwtVerifier;
 
 use crate::context::ParticipantContext;
